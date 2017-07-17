@@ -32,11 +32,10 @@ class RadarVisualizer(object):
                 track_range = int(radarData[str(track_number)+'_track_range'])
                 track_angle = (float(radarData[str(track_number)+'_track_angle'])+90.0)*math.pi/180
   
-
                 x_pos = math.cos(track_angle)*track_range*10
                 y_pos = math.sin(track_angle)*track_range*10
                    
-                print("id=%d range=%f angle=%f,y=%f,x=%f"%(track_number,track_range,float(radarData[str(track_number)+'_track_angle']),y_pos,x_pos))  
+                # print("id=%d range=%f angle=%f,y=%f,x=%f"%(track_number,track_range,float(radarData[str(track_number)+'_track_angle']),y_pos,x_pos))  
                 cv2.circle(self.img, (self.width/2 + int(x_pos), self.height - int(y_pos) - 10), 5, (255, 255, 255))
                 cv2.putText(self.img,str(track_number), 
                     (self.width/2 + int(x_pos)-2, self.height - int(y_pos) - 10), self.font, 0.5, (255,255,255), 2)

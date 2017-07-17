@@ -1,10 +1,6 @@
 #!/usr/bin/python
 """
 esr_listener.py: version 0.1.0
-
-History:
-2016/10/19: Initial version to record processed ESR radar data to ROS bag.
-2016/10/21: Refactor. Add readRawFromROS. Add visualier.
 """
 
 import argparse
@@ -16,10 +12,17 @@ import canlib
 import rospy
 import rosbag
 import std_msgs.msg
+import geometry_msgs.msg
 import json
 import numpy as np
 from esr_visualizer import RadarVisualizer
-from  kvaser.msg import CANESR   
+from  kvaser.msg import RadarTrackArray  
+from  kvaser.msg import RadarTrack  
+from  kvaser.msg import RadarDetection  
+from  kvaser.msg import RadarDetectionArray  
+from  kvaser.msg import RadarRaw
+from geometry_msgs.msg import Point32
+import math 
 idBase = 1279
 
 class RadarDataParser():
@@ -29,6 +32,11 @@ class RadarDataParser():
         self.debug = debug
         self.msg_counter = 0 # Variable that keeps track of the iteration of msg 1344 we are on
         self.target_ready=0
+        self.candata=RadarTrackArray()
+        self.candetection=RadarDetectionArray()
+        self.pub_targets  =   rospy.Publisher('esr_front/targets', RadarTrackArray, queue_size=10)
+        self.pub_detections = rospy.Publisher('esr_front/detections', RadarDetectionArray, queue_size=10)
+        self.pub_canraw =     rospy.Publisher('esr_front/canraw', RadarRaw, queue_size=10)
 
         self.msgToFunc = {
             1248: self.status_one,
@@ -114,10 +122,7 @@ class RadarDataParser():
         msg = []
         if self.debug == True:
             sys.stdout.write("In radar_data_parser and this is a message\n")
-            sys.stdout.write("msgId: %9d  time: %9d  flg: 0x%02x  dlc: %d " % (msgId, time, flg, dlc))
-           
-	#for i in xrange(dlc):
-         #   print(rawmsg[i],"%d,%d,%d,%d!!!!!!!!!!!!!!!"%(dlc,i,rawmsg[i],sys.getsizeof(str(rawmsg[i]))))
+            sys.stdout.write("msgId: %9d  time: %9d  flg: 0x%02x  dlc: %d " % (msgId, time, flg, dlc))          
 
         for i in xrange(dlc):
             #msg[:0] = [rawmsg[i]]
@@ -127,9 +132,7 @@ class RadarDataParser():
         if self.debug == True:
             sys.stdout.write("\n")
         
-
-
-       #print(msgId,msg) 
+        # print(msgId,msg) 
         if msgId in self.msgToFunc:
             # This message is valid, so we need to parse it
             if msgId >= 1280 and msgId <= 1343:
@@ -149,19 +152,27 @@ class RadarDataParser():
                         # Don't return data until now
                         retData = copy.copy(self.data)
                         self.data = {} # Start with a fresh object
+        rawdata=RadarRaw()
+        rawdata.id=msgId
+        rawdata.dat=list(msg)
+        rawdata.header.stamp=rospy.Time.now()
+        self.pub_canraw.publish(rawdata)
         return retData 
 
     def track_msg(self, msgId, msg):
         # """ message ID 500-53F or 1280-1343 """
         track_id = str(msgId-idBase)
         status = ((msg[1] & 0xE0) >> 5)
-    
 
-        if (int(track_id)==64):
-            self.target_ready=1
+    
         if (status < 2 or status > 3):
+            if (int(track_id)==64):
+                self.target_ready=1
+                self.candata.header.stamp=rospy.Time.now()
+                self.pub_targets.publish(self.candata)
+                self.candata.tracks=[]
             return
-       
+
         self.data[track_id + "_track_oncoming"] = (msg[0] & 0x01)
         self.data[track_id + "_track_group_changed"] = ((msg[0] & 0x02) >> 1)
         self.data[track_id + "_track_lat_rate"] = 0.25*((msg[0] & 0xFC) >> 2)
@@ -185,17 +196,35 @@ class RadarDataParser():
             #tempShort =np.short(tempShort)
             tempShort -= 0x10000
 
-        self.data[track_id + "_track_range_accel"] = 0.05 *(float(tempShort))
+        self.data[track_id + "_track_range_accel"] = 0.05*(float(tempShort))
         self.data[track_id + "_track_med_range_mode"] = ((msg[6] & 0xC0) >> 6)
         tempShort = ((msg[6] & 0x3F) << 8) + msg[7]
         if (msg[6] & 0x20):
             tempShort |= 0xC000
             #tempShort =np.short(tempShort)
             tempShort -= 0x10000
-             
-        self.data[track_id + "_track_range_rate"] = 0.01 * (float(tempShort))
 
-        print(track_id, self.data[track_id + "_track_range"] ,self.data[track_id + "_track_angle"],self.data[track_id + "_track_range_rate"] )
+        self.data[track_id + "_track_range_rate"] = 0.01 * (float(tempShort))
+       
+        sigle_taget                     =RadarTrack()
+        track_range                     = int( self.data[track_id+'_track_range'])
+        track_angle                     = (float( self.data[track_id+'_track_angle']))*math.pi/180
+        sigle_taget.track_id            =int(track_id )
+        sigle_taget.track_shape.points  =[]
+        sigle_taget.track_shape.points.append(Point32(math.cos(track_angle)*track_range, math.sin(track_angle)*track_range, 0.0))
+        sigle_taget.linear_velocity.x   =float(self.data[track_id + "_track_range_rate"])
+        sigle_taget.linear_velocity.y   =0
+        sigle_taget.linear_velocity.z   =0
+        sigle_taget.linear_acceleration.x=float(self.data[track_id + "_track_range_accel"] )
+        self.candata.tracks.append(sigle_taget)
+
+        # print(track_id, self.data[track_id + "_track_range"] ,self.data[track_id + "_track_angle"],self.data[track_id + "_track_range_rate"] )
+        if (int(track_id)==64):
+            self.target_ready=1
+            self.candata.header.stamp=rospy.Time.now()
+            self.pub_targets.publish(self.candata)
+            self.candata.tracks=[]
+
     def track_status_msg(self, msg_counter, msg):
         # """ message ID x540 or 1344 """
         add_group = False
@@ -206,12 +235,38 @@ class RadarDataParser():
                 add_group = True
             except KeyError:
                 continue
+            
+            radardetection=RadarDetection()
+            radardetection.detection_id         = int(track_id)  
+            track_range                         = int( self.data[track_id+'_track_range'])
+            track_angle                         = (float( self.data[track_id+'_track_angle']))*math.pi/180
+            radardetection.position.x           = math.cos(track_angle)*track_range
+            radardetection.position.y           = math.sin(track_angle)*track_range
+            radardetection.position.z           =0
+            radardetection.linear_velocity.x    =float(self.data[track_id + "_track_range_rate"])
+            radardetection.linear_velocity.y    =0
+            radardetection.linear_velocity.z    =0
+            radardetection.amplitude            = self.data[track_id + "_track_power"] = (msg[i] & 0x1F)
+            if(radardetection.amplitude&0x10):
+               radardetection.amplitude|=0xE0
+               radardetection.amplitude-=0x100
+           
             self.data[track_id + "_track_moving_fast"] = ((msg[i] & 0x80) >> 7)
             self.data[track_id + "_track_moving_slow"] = ((msg[i] & 0x40) >> 6)
             self.data[track_id + "_track_moving"] = ((msg[i] & 0x20) >> 5)
-            self.data[track_id + "_track_power"] = (msg[i] & 0x1F)
+            
+            if(self.data[track_id + "_track_status"] ==2 or self.data[track_id + "_track_status"]==3 ):
+                self.candetection.detections.append(radardetection)   
+            # print(i,track_id,self.data[track_id + "_track_power"],radardetection.amplitude)
+           
             if ((msg_counter*7)+i) >= 64:
                 break
+            
+        if(len(self.candetection.detections)):
+            self.candetection.header.stamp=rospy.Time.now()
+            self.pub_detections.publish(self.candetection)
+            self.candetection.detections=[]   
+           
 
         if add_group:
             group = str(msg_counter)
@@ -395,49 +450,10 @@ class RadarDataParser():
     def get_target_ready(self):
         return self.target_ready
     
-    def set_target_ready(self,status):
-        self.target_ready=status
+    def set_target_wait(self,value):
+        self.target_ready=value
+    
 
-def readRawFromROS(topic='/can_raw', dataset='data.bag', skip=0, visual=False):
-    bag = rosbag.Bag(dataset, 'r')
-    startsec = 0
-
-    #
-    # msg format:
-    #   header:
-    #     seq: 120556
-    #     stamp:
-    #       secs: 1476173337
-    #       nsecs: 165327047
-    #     frame_id: ''
-    #   count: 120556
-    #   id: 1899
-    #   len: 8
-    #   dat: [2, 0, 0, 0, 0, 0, 0, 0]
-    #   flag: 0
-    #   time: 1219812
-
-    radar = RadarDataParser(debug)
-    if visual:
-        visualizer = RadarVisualizer()
-    for topic, msg, t in bag.read_messages(topics=[topic]):
-        if startsec == 0:
-            startsec = t.to_sec()
-            if skip < 24*60*60:
-                skipping = t.to_sec() + skip
-            else:
-                skipping = skip
-        else:
-            if t.to_sec() > skipping:
-                if topic in [topic]:
-                    if debug == True:
-                        sys.stdout.write(topic)
-                        sys.stdout.write(" seq:%d " % msg.header.seq)
-                    radarData = radar.parseMessage(msg.id, msg.dat, msg.len, msg.flag, msg.time)
-                    if radarData:
-                        #KFC sys.stdout.write(json.dumps(radarData,sort_keys=True, indent=4, separators=(',', ': ')) + '\n')
-                        if visual:
-                            visualizer.update(radarData)
                              
 def readRawFromCAN(ch, debug, visual=False):
     c1 = canlib.canlib()
@@ -464,41 +480,24 @@ def readRawFromCAN(ch, debug, visual=False):
 
 
     rospy.init_node('esr_node', anonymous=True)
-    #pub = rospy.Publisher('esr_front', kvaser.msg.CANESR, queue_size=10)
-    pub = rospy.Publisher('esr_front', CANESR, queue_size=10)
     if visual:
         visualizer = RadarVisualizer()
 
     r = rospy.Rate(10)
     r.sleep()
-    # pub.publish(s)
-    r.sleep()
+
  
     while not rospy.is_shutdown():
         try:
             msgId, msg, dlc, flg, time = ch1.read()
 
-            #
-            # raw can format:
-            #   msgId: 1899
-            #   msg: [2, 0, 0, 0, 0, 0, 0, 0]
-            #   dlc (msg len): 8
-            #   flg: 0
-            #   time: 1219812
-            #
-            candata=CANESR()
-            candata.id=msgId
-            candata.dat=list(msg)
-            candata.header.stamp=rospy.Time.now()
             radarData = radar.parseMessage(msgId, msg, dlc, flg, time)
-            pub.publish(candata)
+                          
             if len(radarData) > 0:
-                #KFC rossend(std.msg.String(data=json.dumps(radarData)))
-                #pub.publish(json.dumps(radarData))
                 if (visual and radar.get_target_ready()):
-                    visualizer.update(radarData)
-                    radar.set_target_ready(0)
-            
+                    visualizer.update(radarData)    
+                    radar.set_target_wait(0)
+                
         except (canlib.canNoMsg) as ex:
             pass
         except (canlib.canError) as ex:
@@ -506,28 +505,64 @@ def readRawFromCAN(ch, debug, visual=False):
 
     rospy.spin()
 
+def readRawFromROS(topic='/can_raw', dataset='data.bag', skip=0, visual=False):
+    bag = rosbag.Bag(dataset, 'r')
+    startsec = 0
+
+    rospy.init_node('esr_rosbag', anonymous=True)
+
+
+    r = rospy.Rate(10)
+    r.sleep()
+    radar = RadarDataParser(debug)
+    print("ros********")
+    if visual:
+        visualizer = RadarVisualizer()
+    for topic, msg, t in bag.read_messages(topics=[topic]):
+        if startsec == 0:
+            startsec = t.to_sec()
+            if skip < 24*60*60:
+                skipping = t.to_sec() + skip
+            else:
+                skipping = skip
+        else:
+            if t.to_sec() > skipping:
+                if topic in [topic]:
+                    if debug == True:
+                        sys.stdout.write(topic)
+                        sys.stdout.write(" seq:%d " % msg.header.seq)
+                    msgtemp=[]
+                    for i in xrange(msg.dlc):
+                        msgtemp.append(int(struct.unpack('B', msg.data[i])[0]))
+                    radarData = radar.parseMessage(msg.id, msgtemp, msg.dlc, 0, 0)
+                    if radarData:
+                        #KFC sys.stdout.write(json.dumps(radarData,sort_keys=True, indent=4, separators=(',', ': ')) + '\n')
+                        if visual:
+                            visualizer.update(radarData)
+
+
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description='Udacity SDC Micro Challenge Radar viewer')
+    parser = argparse.ArgumentParser(description='Radar viewer')
     parser.add_argument('--channel', type=int, default=0, help='CANbus channel where target ESR radar is located')
-    parser.add_argument('--dataset', type=str, default='dataset.bag', help='Dataset/ROS Bag name')
     parser.add_argument('--debug', action='store_true', default=False, help='display debug messages')
+    parser.add_argument('--visual', action='store_true', default=False, help='Visualize the Radar tracks')
+    parser.add_argument('--dataset', type=str, default='dataset.bag', help='Dataset/ROS Bag name')
     parser.add_argument('--mode', type=str, default='CAN', help='Read Radar raw from "CAN" bus or "ROS" topic')
     parser.add_argument('--skip', type=int, default="0", help='skip seconds')   
     parser.add_argument('--topic', type=str, default='/can_raw', help='Read Radar raw from a ROS topic')
-    parser.add_argument('--visual', action='store_true', default=False, help='Visualize the Radar tracks')
     args = parser.parse_args()
 
-    ch = args.channel
+    ch    = args.channel
     debug = args.debug
-    mode = args.mode
-
-    print("mode=%s,ch=%s,visual=%s*******************************"%(mode,ch,args.visual));
+    mode  = args.mode
+    print("ch=%s,visual=%s*******************************"%(ch,args.visual));
 
     if mode == 'ROS':
         readRawFromROS(topic=args.topic, dataset=args.dataset, skip=args.skip, visual=args.visual)
     else:
         readRawFromCAN(ch, debug, visual=args.visual) 
+
 
 
 

@@ -60,9 +60,6 @@ add_message_files(
  # CANPacket.msg
   RadarTrack.msg
   RadarTrackArray.msg
-  RadarDetection.msg
-  RadarDetectionArray.msg
-  RadarRaw.msg
 #  Vibration.msg
 )
 
